@@ -1,4 +1,6 @@
-FROM quay.io/centos/centos:stream9
+ARG FROM=quay.io/centos/centos:stream9
+
+FROM ${FROM}
 
 RUN dnf install -y sssd sssd-tools sssd-ldap sssd-nfs-idmap sssd-krb5 sssd-ad sssd-ipa \
     && dnf clean all \

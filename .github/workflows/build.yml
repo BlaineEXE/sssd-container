@@ -1,0 +1,130 @@
+name: Build
+on:
+  pull_request: {}
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: '0 * * * *'
+
+env:
+  RELEASE_REGISTRY: quay.io
+  RELEASE_REPO: quay.io/brgardne/sssd
+
+defaults:
+  run:
+    # reference: https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions#using-a-specific-shell
+    shell: bash --noprofile --norc -eo pipefail -x {0}
+
+# cancel the in-progress workflow when PR is refreshed.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.sha }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        base-image :
+          - quay.io/centos/centos:stream8
+          - quay.io/centos/centos:stream9
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Log in to release repo
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.RELEASE_REGISTRY }}
+          username: ${{ secrets.RELEASE_REPO_USERNAME }}
+          password: ${{ secrets.RELEASE_REPO_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Set up QEMU for multi-arch builds
+        uses: docker/setup-qemu-action@v2
+        with:
+          platforms: 'arm64'
+
+      - name: Generate tag names
+        id: tags
+        run: |
+          date="$(date +%Y%M%d%H%M)"
+          full='${{ matrix.base-image }}' # full image like https://repo/library/image:tag
+          tag="${full##*:}"               # get content after last ':'
+          full_no_tag="${full%:*}"        # remove content after last ':'
+          image="${full_no_tag##*/}"      # get content after last '/'
+          os="${image}-${tag}"
+          os_and_date="${os}-${date}"
+          echo "tags: ${os}, ${os_and_date}"
+          echo "::set-output name=OS_TAG::${{ env.RELEASE_REPO }}:${os}"
+          echo "::set-output name=OS_AND_DATE_TAG::${{ env.RELEASE_REPO }}:${os_and_date}"
+
+      # we could acomplish the same end behavior job/step 'if' conditionals, but the logic is
+      # complex, and this script is easier to read and maintain
+      - name: Determine if this is a release
+        id: check-release
+        run: |
+          #!/usr/bin/env bash
+          set -xeuo pipefail
+
+          # use this function to return results from this script
+          function return_should_release() {
+            if [[ "$1" != 'true' ]] && [[ "$1" != 'false' ]]; then echo "return '$1' not supported"; exit 1; fi
+            echo "::set-output name=SHOULD_RELEASE::$1"
+            exit 0
+          }
+
+          #
+          # do not release if we aren't on main branch
+          # e.g., do not release for PRs
+          #
+          if [[ '${{ github.ref }}' != 'refs/heads/main' ]]; then
+            return_should_release false
+          fi
+
+          #
+          # always release a new build if the main branch's code is updated
+          #
+          if [[ '${{ github.event_name }}' == 'push' ]]; then
+            return_should_release true
+          fi
+
+          #
+          # if we get here, we are on the main branch, but the code isn't updated
+          # at this point, we only want to release if there is an update to the base image
+          #
+          function get_layers() {
+            docker pull "$1" &>/dev/stderr
+            docker image inspect "$1" | jq -r '.[].RootFS.Layers'
+          }
+          base_layers="$( get_layers "${{ matrix.base-image }}" )"
+          build_layers="$( get_layers "${{ steps.tags.outputs.OS_TAG }}" )"
+          # subtract build layers from base will return empty list if all base layers are in build
+          # returns 'true' if base doesn't contain all layers from build; 'false' otherwise
+          base_updated="$(jq '.base-.build | .!=[]' <<<"{\"base\": $base_layers, \"build\": $build_layers}")"
+
+          return_should_release $base_updated
+
+      # always build to make sure builds succeed in CI
+      - name: Build and push image
+        # if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
+        uses: docker/build-push-action@v3
+        with:
+          context: .
+          file: ./Containerfile
+          build-args: |
+            FROM=${{ matrix.base-image }}
+          tags: |
+            ${{ steps.tags.outputs.OS_TAG }}
+            ${{ steps.tags.outputs.OS_AND_DATE_TAG }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ steps.check-release.outputs.SHOULD_RELEASE}}

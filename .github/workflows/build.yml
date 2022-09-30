@@ -57,7 +57,7 @@ jobs:
       - name: Generate tag names
         id: tags
         run: |
-          date="$(date +%Y%M%d%H%M)"
+          date="$(date +%Y%m%d%H%M)"
           full='${{ matrix.base-image }}' # full image like https://repo/library/image:tag
           tag="${full##*:}"               # get content after last ':'
           full_no_tag="${full%:*}"        # remove content after last ':'
